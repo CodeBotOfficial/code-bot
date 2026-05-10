@@ -13,6 +13,9 @@ const ARRIVALS_CHANNEL_ID    = '1463496101549047984';
 const DEPARTURES_CHANNEL_ID  = '1463496203147808909';
 const WEBHOOK_ARRIVALS       = process.env.WEBHOOK_RC_ARRIVALS;
 const WEBHOOK_GO             = process.env.WEBHOOK_RC_GO;
+const WEBHOOK_RC_BOOST       = process.env.WEBHOOK_RC_BOOST;
+
+const BOOST_CHANNEL_ID       = '1463479079222116477';
 
 const REGLEMENT_USER_ID      = '1474131126233731244';
 const REGLEMENT_ROLE_ID      = '1499055628893683822';
@@ -138,7 +141,6 @@ async function sendServiceLog(guild, user, type, sessionMinutes = null, forcedBy
       .setFooter({ text: 'Roblox Community • Logs de service' })
       .setTimestamp();
   } else if (type === 'force') {
-    // Log spécifique pour un arrêt forcé par le staff
     embed = new EmbedBuilder()
       .setColor(0xFF8C00)
       .setTitle('🛑 Fin de service forcée')
@@ -213,7 +215,6 @@ async function sendTierlist(message) {
 //  RESET hebdomadaire — chaque lundi à 00:01 heure Paris
 // ─────────────────────────────────────────────
 
-// Calcule le timestamp UTC du prochain lundi à 00:01 heure de Paris
 function getNextMondayParis() {
   const now = new Date();
 
@@ -353,6 +354,22 @@ module.exports = (client) => {
     await sendWebhook(WEBHOOK_GO, { embeds: [embed] });
   });
 
+  // ── Boost du serveur ───────────────────────
+  client.on('guildMemberUpdate', async (oldMember, newMember) => {
+    if (newMember.guild.id !== GUILD_ID) return;
+
+    const wasBooster = oldMember.premiumSince;
+    const isBooster  = newMember.premiumSince;
+
+    // La personne vient juste de commencer à booster
+    if (!wasBooster && isBooster) {
+      await sendWebhook(WEBHOOK_RC_BOOST, {
+        content: `Merci beaucoup à <@${newMember.id}> d'avoir boost le serveur ! 🚀💎`,
+        allowed_mentions: { users: [newMember.id] },
+      });
+    }
+  });
+
   // ── Commandes (messageCreate) ──────────────
   client.on('messageCreate', async (message) => {
     if (message.guild?.id !== GUILD_ID) return;
@@ -403,7 +420,6 @@ module.exports = (client) => {
 
     // !forcestop_service {userId} ─────────────
     if (cmdLower.startsWith('!forcestop_service')) {
-      // Vérifie que l'auteur est bien un membre du staff (permission ManageRoles ou Administrator)
       if (!message.member.permissions.has('ManageRoles')) {
         return message.reply({
           content: '❌ Tu n\'as pas la permission d\'utiliser cette commande.',
@@ -411,7 +427,6 @@ module.exports = (client) => {
         });
       }
 
-      // Récupère l'ID fourni en argument
       const args = cmd.trim().split(/\s+/);
       const targetId = args[1];
 
@@ -422,7 +437,6 @@ module.exports = (client) => {
         });
       }
 
-      // Récupère le membre via son ID
       let targetUser;
       try {
         targetUser = await message.guild.members.fetch(targetId);
@@ -433,7 +447,6 @@ module.exports = (client) => {
         });
       }
 
-      // Vérifie que la cible est bien en service
       if (!targetUser.roles.cache.has(SERVICE_ROLE_ID)) {
         return message.reply({
           content: `⚠️ <@${targetUser.id}> n'est pas en service.`,
@@ -443,7 +456,6 @@ module.exports = (client) => {
 
       try {
         const sessionMinutes = await stopService(message.guild, targetUser, message.author);
-
         await message.reply({
           content: `🛑 Le service de <@${targetUser.id}> a été **arrêté de force** par <@${message.author.id}>. (Session : ${formatDuration(sessionMinutes)})`,
           allowedMentions: { repliedUser: false },
