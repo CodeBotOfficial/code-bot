@@ -1,0 +1,12 @@
+{
+  "name": "code-bot",
+  "version": "1.0.0",
+  "description": "Bot Discord by ._ops",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.0.0"
+  }
+}
