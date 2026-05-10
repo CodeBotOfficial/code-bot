@@ -3,7 +3,6 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  PermissionFlagsBits,
 } = require('discord.js');
 
 // ─────────────────────────────────────────────
@@ -17,36 +16,29 @@ const WEBHOOK_GO             = process.env.WEBHOOK_RC_GO;
 const WEBHOOK_RC_BOOST       = process.env.WEBHOOK_RC_BOOST;
 
 const BOOST_CHANNEL_ID       = '1463479079222116477';
-const NUMBER_CHANNEL_ID      = '1502962636042670161';
-
-// IDs autorisés pour les commandes de la route de l'infini
-const NUMBER_CMD_ALLOWED     = ['1474131126233731244', '1238207780570005525'];
 
 const REGLEMENT_USER_ID      = '1474131126233731244';
 const REGLEMENT_ROLE_ID      = '1499055628893683822';
 
 // ── Service ──────────────────────────────────
-const CMD_CHANNEL_ID         = '1491714863234551970';
-const LOG_CHANNEL_ID         = '1491716031574446090';
-const SERVICE_LOG_CHANNEL_ID = '1500596907628695632';
-const TIERLIST_CHANNEL_ID    = '1500612654627295382';
-const SERVICE_ROLE_ID        = '1500275387672821912';
+const CMD_CHANNEL_ID         = '1491714863234551970'; // salon des commandes !ServiceOn/Off
+const LOG_CHANNEL_ID         = '1491716031574446090'; // salon de l'embed "en service"
+const SERVICE_LOG_CHANNEL_ID = '1500596907628695632'; // salon des logs de service
+const TIERLIST_CHANNEL_ID    = '1500612654627295382'; // salon pour !tierlist_service
+const SERVICE_ROLE_ID        = '1500275387672821912'; // rôle "En service"
 
 // ─────────────────────────────────────────────
 //  STATE
 // ─────────────────────────────────────────────
-let embedMessageId = null;
-const serviceSessionStart = new Map();
-let weeklyStats = {};
-
-// ── Route de l'infini ─────────────────────────
-let currentNumber = 1;
-let lastUserId    = null;
-const muteTimeouts = new Map();
+let embedMessageId = null;                   // ID du message embed "animateurs en service"
+const serviceSessionStart = new Map();       // userId → timestamp début session (ms)
+let weeklyStats = {};                        // userId → minutes totales cette semaine
 
 // ─────────────────────────────────────────────
 //  UTILITAIRES
 // ─────────────────────────────────────────────
+
+// Formate des minutes en "Xh Ym"
 function formatDuration(minutes) {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
@@ -55,6 +47,7 @@ function formatDuration(minutes) {
   return `${m}min`;
 }
 
+// Formate une Date en FR (fuseau Europe/Paris)
 function formatDate(date) {
   return date.toLocaleDateString('fr-FR', {
     day: '2-digit', month: 'long', year: 'numeric',
@@ -63,6 +56,7 @@ function formatDate(date) {
   });
 }
 
+// Envoie un webhook Discord
 async function sendWebhook(webhookUrl, payload) {
   try {
     const response = await fetch(webhookUrl, {
@@ -75,15 +69,6 @@ async function sendWebhook(webhookUrl, payload) {
     }
   } catch (err) {
     console.error('[Webhook] Erreur lors de l\'envoi :', err);
-  }
-}
-
-// Envoie un DM à l'utilisateur (vraiment invisible pour les autres)
-async function sendDM(user, content) {
-  try {
-    await user.send(content);
-  } catch (err) {
-    console.error(`[DM] Impossible d'envoyer un DM à ${user.username} :`, err);
   }
 }
 
@@ -120,7 +105,7 @@ async function updateServiceEmbed(guild) {
         await existing.edit({ embeds: [embed] });
         return;
       } catch {
-        embedMessageId = null;
+        embedMessageId = null; // supprimé manuellement → on recrée
       }
     }
 
@@ -227,8 +212,9 @@ async function sendTierlist(message) {
 }
 
 // ─────────────────────────────────────────────
-//  RESET hebdomadaire
+//  RESET hebdomadaire — chaque lundi à 00:01 heure Paris
 // ─────────────────────────────────────────────
+
 function getNextMondayParis() {
   const now = new Date();
 
@@ -246,7 +232,9 @@ function getNextMondayParis() {
   const weekday = ['dim','lun','mar','mer','jeu','ven','sam'].indexOf(parts.weekday.slice(0,3).toLowerCase());
 
   const daysUntil = weekday === 1 ? 7 : (8 - weekday) % 7;
+
   const targetParis = new Date(year, month, day + daysUntil, 0, 1, 0, 0);
+
   const utcNow   = Date.UTC(year, month, day, parseInt(parts.hour,10), parseInt(parts.minute,10));
   const offsetMs = utcNow - now.getTime();
 
@@ -289,31 +277,6 @@ async function stopService(guild, targetMember, forcedBy = null) {
 }
 
 // ─────────────────────────────────────────────
-//  ROUTE DE L'INFINI — helpers
-// ─────────────────────────────────────────────
-function containsEmoji(text) {
-  const unicodeEmojiRegex = /\p{Emoji_Presentation}|\p{Extended_Pictographic}/u;
-  const discordEmojiRegex = /<a?:\w+:\d+>/;
-  return unicodeEmojiRegex.test(text) || discordEmojiRegex.test(text);
-}
-
-async function muteInChannel(channel, member) {
-  try {
-    await channel.permissionOverwrites.edit(member.id, { SendMessages: false });
-  } catch (err) {
-    console.error('[Route Infini] Erreur lors du mute :', err);
-  }
-}
-
-async function unmuteInChannel(channel, memberId) {
-  try {
-    await channel.permissionOverwrites.delete(memberId);
-  } catch (err) {
-    console.error('[Route Infini] Erreur lors du unmute :', err);
-  }
-}
-
-// ─────────────────────────────────────────────
 //  MODULE PRINCIPAL
 // ─────────────────────────────────────────────
 module.exports = (client) => {
@@ -334,10 +297,10 @@ module.exports = (client) => {
   client.on('guildMemberAdd', async (member) => {
     if (member.guild.id !== GUILD_ID) return;
 
-    const guild     = member.guild;
-    const user      = member.user;
-    const avatarUrl = user.displayAvatarURL({ size: 256, dynamic: true });
-    const joinedAt  = new Date();
+    const guild       = member.guild;
+    const user        = member.user;
+    const avatarUrl   = user.displayAvatarURL({ size: 256, dynamic: true });
+    const joinedAt    = new Date();
 
     const embed = {
       color: 0x57F287,
@@ -398,6 +361,7 @@ module.exports = (client) => {
     const wasBooster = oldMember.premiumSince;
     const isBooster  = newMember.premiumSince;
 
+    // La personne vient juste de commencer à booster
     if (!wasBooster && isBooster) {
       await sendWebhook(WEBHOOK_RC_BOOST, {
         content: `Merci beaucoup à <@${newMember.id}> d'avoir boost le serveur ! 🚀💎`,
@@ -413,152 +377,6 @@ module.exports = (client) => {
 
     const cmd      = message.content.trim();
     const cmdLower = cmd.toLowerCase();
-    const userId   = message.author.id;
-
-    // ══════════════════════════════════════════
-    //  ROUTE DE L'INFINI
-    // ══════════════════════════════════════════
-    if (message.channel.id === NUMBER_CHANNEL_ID) {
-
-      const content   = message.content.trim();
-      const isAllowed = message.member.permissions.has(PermissionFlagsBits.Administrator)
-                     || NUMBER_CMD_ALLOWED.includes(userId);
-
-      // ── !set_number ───────────────────────
-      if (cmdLower.startsWith('!set_number')) {
-        if (!isAllowed) {
-          try { await message.delete(); } catch {}
-          await sendDM(message.author,
-            '❌ Seuls les administrateurs autorisés peuvent utiliser `!set_number`.'
-          );
-          return;
-        }
-
-        const args      = content.split(/\s+/);
-        const newNumber = parseInt(args[1], 10);
-
-        if (isNaN(newNumber) || newNumber < 1) {
-          try { await message.delete(); } catch {}
-          await sendDM(message.author,
-            '⚠️ Utilisation : `!set_number <nombre>` (nombre entier positif)'
-          );
-          return;
-        }
-
-        currentNumber = newNumber;
-        lastUserId    = null;
-        try { await message.delete(); } catch {}
-        await message.channel.send(`✅ La route de l'infini repart à partir de **${newNumber}** !`);
-        return;
-      }
-
-      // ── !unban ────────────────────────────
-      if (cmdLower.startsWith('!unban')) {
-        if (!isAllowed) {
-          try { await message.delete(); } catch {}
-          await sendDM(message.author,
-            '❌ Seuls les administrateurs autorisés peuvent utiliser `!unban`.'
-          );
-          return;
-        }
-
-        const args     = content.split(/\s+/);
-        const targetId = args[1];
-
-        if (!targetId || !/^\d+$/.test(targetId)) {
-          try { await message.delete(); } catch {}
-          await sendDM(message.author, '⚠️ Utilisation : `!unban <ID du membre>`');
-          return;
-        }
-
-        // Annule le timeout automatique s'il existe
-        if (muteTimeouts.has(targetId)) {
-          clearTimeout(muteTimeouts.get(targetId));
-          muteTimeouts.delete(targetId);
-        }
-
-        try {
-          await message.channel.permissionOverwrites.delete(targetId);
-          try { await message.delete(); } catch {}
-          await message.channel.send(`✅ <@${targetId}> peut de nouveau écrire dans ce salon.`);
-        } catch (err) {
-          console.error('[Unban] Erreur :', err);
-          await sendDM(message.author, '❌ Impossible de débannir ce membre. Vérifie mes permissions.');
-        }
-        return;
-      }
-
-      // ── Validation du nombre ──────────────
-
-      // 1. Contient un emoji → suppression + DM
-      if (containsEmoji(content)) {
-        try { await message.delete(); } catch {}
-        await sendDM(message.author,
-          `❌ Les emojis ne sont pas autorisés dans ce salon ! Envoie uniquement le nombre **${currentNumber}**.`
-        );
-        return;
-      }
-
-      // 2. Le message n'est pas un nombre entier pur → suppression + DM
-      const sentNumber = parseInt(content, 10);
-      if (isNaN(sentNumber) || sentNumber.toString() !== content) {
-        try { await message.delete(); } catch {}
-        await sendDM(message.author,
-          `❌ Envoie uniquement le nombre **${currentNumber}**, sans texte ni emoji.`
-        );
-        return;
-      }
-
-      // 3. Même personne deux fois de suite → suppression + DM
-      if (userId === lastUserId) {
-        try { await message.delete(); } catch {}
-        await sendDM(message.author,
-          `❌ Tu ne peux pas envoyer deux nombres à la suite ! Attends qu'une autre personne joue.`
-        );
-        return;
-      }
-
-      // 4. Mauvais nombre → suppression + DM (+ ban 2h si écart ≥ 67)
-      if (sentNumber !== currentNumber) {
-        try { await message.delete(); } catch {}
-
-        const diff = Math.abs(sentNumber - currentNumber);
-
-        if (diff >= 67) {
-          await sendDM(message.author,
-            `🚨 Tu as envoyé **${sentNumber}** alors que le nombre attendu était **${currentNumber}**. Tu es **banni du salon pendant 2 heures** pour tentative de sabotage.`
-          );
-
-          await muteInChannel(message.channel, message.member);
-          await message.channel.send(
-            `🚫 <@${userId}> a été **banni du salon pendant 2 heures** pour avoir envoyé un nombre complètement erroné (**${sentNumber}** au lieu de **${currentNumber}**).`
-          );
-
-          const timeout = setTimeout(async () => {
-            await unmuteInChannel(message.channel, userId);
-            muteTimeouts.delete(userId);
-            await message.channel.send(`✅ <@${userId}> peut de nouveau écrire dans ce salon.`);
-          }, 2 * 60 * 60 * 1000);
-
-          muteTimeouts.set(userId, timeout);
-
-        } else {
-          await sendDM(message.author,
-            `❌ Mauvais nombre ! Le prochain nombre attendu est **${currentNumber}**. Ton message a été supprimé.`
-          );
-        }
-        return;
-      }
-
-      // 5. Nombre correct ✅
-      lastUserId = userId;
-      currentNumber++;
-      return;
-    }
-
-    // ══════════════════════════════════════════
-    //  COMMANDES GÉNÉRALES
-    // ══════════════════════════════════════════
 
     // !reglement_rc ──────────────────────────
     if (cmd === '!reglement_rc') {
@@ -609,7 +427,7 @@ module.exports = (client) => {
         });
       }
 
-      const args     = cmd.trim().split(/\s+/);
+      const args = cmd.trim().split(/\s+/);
       const targetId = args[1];
 
       if (!targetId || !/^\d+$/.test(targetId)) {
