@@ -15,10 +15,12 @@ const DEPARTURES_CHANNEL_ID  = '1463496203147808909';
 const WEBHOOK_ARRIVALS       = process.env.WEBHOOK_RC_ARRIVALS;
 const WEBHOOK_GO             = process.env.WEBHOOK_RC_GO;
 const WEBHOOK_RC_BOOST       = process.env.WEBHOOK_RC_BOOST;
-const WEBHOOK_RC_NUMBER      = process.env.WEBHOOK_RC_NUMBER;
 
 const BOOST_CHANNEL_ID       = '1463479079222116477';
 const NUMBER_CHANNEL_ID      = '1502962636042670161';
+
+// IDs autorisés pour les commandes de la route de l'infini
+const NUMBER_CMD_ALLOWED     = ['1474131126233731244', '1238207780570005525'];
 
 const REGLEMENT_USER_ID      = '1474131126233731244';
 const REGLEMENT_ROLE_ID      = '1499055628893683822';
@@ -38,8 +40,9 @@ const serviceSessionStart = new Map();
 let weeklyStats = {};
 
 // ── Route de l'infini ─────────────────────────
-let currentNumber   = 1;   // prochain nombre attendu
-let lastUserId      = null; // userId du dernier message valide
+let currentNumber = 1;
+let lastUserId    = null;
+const muteTimeouts = new Map();
 
 // ─────────────────────────────────────────────
 //  UTILITAIRES
@@ -75,23 +78,12 @@ async function sendWebhook(webhookUrl, payload) {
   }
 }
 
-// Envoie un message éphémère via webhook (visible uniquement par l'utilisateur)
-async function sendEphemeralWebhook(webhookUrl, userId, content) {
+// Envoie un DM à l'utilisateur (vraiment invisible pour les autres)
+async function sendDM(user, content) {
   try {
-    const response = await fetch(webhookUrl + '?wait=true', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        content,
-        flags: 64, // EPHEMERAL
-        allowed_mentions: { users: [userId] },
-      }),
-    });
-    if (!response.ok) {
-      console.error(`[Webhook Ephémère] Erreur HTTP ${response.status} : ${await response.text()}`);
-    }
+    await user.send(content);
   } catch (err) {
-    console.error('[Webhook Ephémère] Erreur :', err);
+    console.error(`[DM] Impossible d'envoyer un DM à ${user.username} :`, err);
   }
 }
 
@@ -254,9 +246,7 @@ function getNextMondayParis() {
   const weekday = ['dim','lun','mar','mer','jeu','ven','sam'].indexOf(parts.weekday.slice(0,3).toLowerCase());
 
   const daysUntil = weekday === 1 ? 7 : (8 - weekday) % 7;
-
   const targetParis = new Date(year, month, day + daysUntil, 0, 1, 0, 0);
-
   const utcNow   = Date.UTC(year, month, day, parseInt(parts.hour,10), parseInt(parts.minute,10));
   const offsetMs = utcNow - now.getTime();
 
@@ -301,38 +291,27 @@ async function stopService(guild, targetMember, forcedBy = null) {
 // ─────────────────────────────────────────────
 //  ROUTE DE L'INFINI — helpers
 // ─────────────────────────────────────────────
-
-// Vérifie si le contenu contient un emoji (unicode ou Discord custom)
 function containsEmoji(text) {
-  // Emoji unicode
   const unicodeEmojiRegex = /\p{Emoji_Presentation}|\p{Extended_Pictographic}/u;
-  // Emoji Discord custom <:name:id> ou <a:name:id>
   const discordEmojiRegex = /<a?:\w+:\d+>/;
   return unicodeEmojiRegex.test(text) || discordEmojiRegex.test(text);
 }
 
-// Mute (timeout) un membre pendant 2 heures dans le salon via permission overwrites
 async function muteInChannel(channel, member) {
   try {
-    await channel.permissionOverwrites.edit(member.id, {
-      SendMessages: false,
-    });
+    await channel.permissionOverwrites.edit(member.id, { SendMessages: false });
   } catch (err) {
     console.error('[Route Infini] Erreur lors du mute :', err);
   }
 }
 
-// Unmute un membre dans le salon (retire l'overwrite)
-async function unmuteInChannel(channel, member) {
+async function unmuteInChannel(channel, memberId) {
   try {
-    await channel.permissionOverwrites.delete(member.id);
+    await channel.permissionOverwrites.delete(memberId);
   } catch (err) {
     console.error('[Route Infini] Erreur lors du unmute :', err);
   }
 }
-
-// Map pour stocker les timeouts de unmute : userId → TimeoutId
-const muteTimeouts = new Map();
 
 // ─────────────────────────────────────────────
 //  MODULE PRINCIPAL
@@ -434,31 +413,33 @@ module.exports = (client) => {
 
     const cmd      = message.content.trim();
     const cmdLower = cmd.toLowerCase();
+    const userId   = message.author.id;
 
     // ══════════════════════════════════════════
     //  ROUTE DE L'INFINI
     // ══════════════════════════════════════════
     if (message.channel.id === NUMBER_CHANNEL_ID) {
 
-      const userId  = message.author.id;
-      const content = message.content.trim();
+      const content   = message.content.trim();
+      const isAllowed = message.member.permissions.has(PermissionFlagsBits.Administrator)
+                     || NUMBER_CMD_ALLOWED.includes(userId);
 
-      // ── Commande !set_number (admins uniquement) ──
+      // ── !set_number ───────────────────────
       if (cmdLower.startsWith('!set_number')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        if (!isAllowed) {
           try { await message.delete(); } catch {}
-          await sendEphemeralWebhook(WEBHOOK_RC_NUMBER, userId,
-            '❌ Seuls les administrateurs peuvent utiliser `!set_number`.'
+          await sendDM(message.author,
+            '❌ Seuls les administrateurs autorisés peuvent utiliser `!set_number`.'
           );
           return;
         }
 
-        const args = content.split(/\s+/);
+        const args      = content.split(/\s+/);
         const newNumber = parseInt(args[1], 10);
 
         if (isNaN(newNumber) || newNumber < 1) {
           try { await message.delete(); } catch {}
-          await sendEphemeralWebhook(WEBHOOK_RC_NUMBER, userId,
+          await sendDM(message.author,
             '⚠️ Utilisation : `!set_number <nombre>` (nombre entier positif)'
           );
           return;
@@ -471,12 +452,12 @@ module.exports = (client) => {
         return;
       }
 
-      // ── Commande !unban (admins uniquement) ──
+      // ── !unban ────────────────────────────
       if (cmdLower.startsWith('!unban')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        if (!isAllowed) {
           try { await message.delete(); } catch {}
-          await sendEphemeralWebhook(WEBHOOK_RC_NUMBER, userId,
-            '❌ Seuls les administrateurs peuvent utiliser `!unban`.'
+          await sendDM(message.author,
+            '❌ Seuls les administrateurs autorisés peuvent utiliser `!unban`.'
           );
           return;
         }
@@ -486,9 +467,7 @@ module.exports = (client) => {
 
         if (!targetId || !/^\d+$/.test(targetId)) {
           try { await message.delete(); } catch {}
-          await sendEphemeralWebhook(WEBHOOK_RC_NUMBER, userId,
-            '⚠️ Utilisation : `!unban <ID du membre>`'
-          );
+          await sendDM(message.author, '⚠️ Utilisation : `!unban <ID du membre>`');
           return;
         }
 
@@ -504,84 +483,76 @@ module.exports = (client) => {
           await message.channel.send(`✅ <@${targetId}> peut de nouveau écrire dans ce salon.`);
         } catch (err) {
           console.error('[Unban] Erreur :', err);
-          await sendEphemeralWebhook(WEBHOOK_RC_NUMBER, userId,
-            '❌ Impossible de débannir ce membre. Vérifie mes permissions.'
-          );
+          await sendDM(message.author, '❌ Impossible de débannir ce membre. Vérifie mes permissions.');
         }
         return;
       }
 
-      // ── Validation du nombre ──────────────────
+      // ── Validation du nombre ──────────────
 
-      // 1. Contient un emoji → suppression
+      // 1. Contient un emoji → suppression + DM
       if (containsEmoji(content)) {
         try { await message.delete(); } catch {}
-        await sendEphemeralWebhook(WEBHOOK_RC_NUMBER, userId,
+        await sendDM(message.author,
           `❌ Les emojis ne sont pas autorisés dans ce salon ! Envoie uniquement le nombre **${currentNumber}**.`
         );
         return;
       }
 
-      // 2. Parse le nombre envoyé
+      // 2. Le message n'est pas un nombre entier pur → suppression + DM
       const sentNumber = parseInt(content, 10);
-
-      // 3. Le message n'est pas un nombre entier valide → suppression
       if (isNaN(sentNumber) || sentNumber.toString() !== content) {
         try { await message.delete(); } catch {}
-        await sendEphemeralWebhook(WEBHOOK_RC_NUMBER, userId,
+        await sendDM(message.author,
           `❌ Envoie uniquement le nombre **${currentNumber}**, sans texte ni emoji.`
         );
         return;
       }
 
-      // 4. Même personne que le dernier message valide → suppression
+      // 3. Même personne deux fois de suite → suppression + DM
       if (userId === lastUserId) {
         try { await message.delete(); } catch {}
-        await sendEphemeralWebhook(WEBHOOK_RC_NUMBER, userId,
+        await sendDM(message.author,
           `❌ Tu ne peux pas envoyer deux nombres à la suite ! Attends qu'une autre personne joue.`
         );
         return;
       }
 
-      // 5. Mauvais nombre → suppression + vérification ban
+      // 4. Mauvais nombre → suppression + DM (+ ban 2h si écart ≥ 67)
       if (sentNumber !== currentNumber) {
         try { await message.delete(); } catch {}
 
-        // Ban 2h si le nombre envoyé est trop éloigné (67 ou 69 chiffres d'écart ou plus)
         const diff = Math.abs(sentNumber - currentNumber);
+
         if (diff >= 67) {
-          await sendEphemeralWebhook(WEBHOOK_RC_NUMBER, userId,
-            `🚨 Tu as envoyé un nombre complètement faux (**${sentNumber}** alors que c'était **${currentNumber}**) ! Tu es **banni du salon pendant 2 heures**.`
+          await sendDM(message.author,
+            `🚨 Tu as envoyé **${sentNumber}** alors que le nombre attendu était **${currentNumber}**. Tu es **banni du salon pendant 2 heures** pour tentative de sabotage.`
           );
 
-          // Applique le mute 2h dans le salon
-          const channel = message.channel;
-          await muteInChannel(channel, message.member);
+          await muteInChannel(message.channel, message.member);
+          await message.channel.send(
+            `🚫 <@${userId}> a été **banni du salon pendant 2 heures** pour avoir envoyé un nombre complètement erroné (**${sentNumber}** au lieu de **${currentNumber}**).`
+          );
 
-          // Annonce publique
-          await channel.send(`🚫 <@${userId}> a été **banni du salon pendant 2 heures** pour avoir envoyé un nombre complètement erroné.`);
-
-          // Unmute automatique après 2h
           const timeout = setTimeout(async () => {
-            await unmuteInChannel(channel, message.member);
+            await unmuteInChannel(message.channel, userId);
             muteTimeouts.delete(userId);
-            await channel.send(`✅ <@${userId}> peut de nouveau écrire dans ce salon.`);
+            await message.channel.send(`✅ <@${userId}> peut de nouveau écrire dans ce salon.`);
           }, 2 * 60 * 60 * 1000);
 
           muteTimeouts.set(userId, timeout);
 
         } else {
-          await sendEphemeralWebhook(WEBHOOK_RC_NUMBER, userId,
+          await sendDM(message.author,
             `❌ Mauvais nombre ! Le prochain nombre attendu est **${currentNumber}**. Ton message a été supprimé.`
           );
         }
         return;
       }
 
-      // 6. Nombre correct ✅
+      // 5. Nombre correct ✅
       lastUserId = userId;
       currentNumber++;
-
       return;
     }
 
