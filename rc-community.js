@@ -17,7 +17,7 @@ const WEBHOOK_GO             = process.env.WEBHOOK_RC_GO;
 const WEBHOOK_RC_BOOST       = process.env.WEBHOOK_RC_BOOST;
 
 const BOOST_CHANNEL_ID       = '1463479079222116477';
-const NUMBER_CHANNEL_ID      = '1502962636042670161';
+const NUMBER_CHANNEL_ID      = '1502969561207672864';
 
 // IDs autorisés pour les commandes de la route de l'infini
 const NUMBER_CMD_ALLOWED     = ['1474131126233731244', '1238207780570005525'];
